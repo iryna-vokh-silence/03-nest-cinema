@@ -1,0 +1,21 @@
+# MongoDB for local development and e2e tests:
+#   docker compose up -d
+# The API connects with MONGODB_URI from .env (mongodb://localhost:27017/cinema);
+# the e2e tests use a separate database on the same server (cinema_test).
+services:
+  mongo:
+    image: mongo:7
+    container_name: nest-cinema-mongo
+    restart: unless-stopped
+    ports:
+      - '${MONGO_PORT:-27017}:27017'
+    volumes:
+      - mongodata:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mongodata:

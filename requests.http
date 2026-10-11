@@ -1,0 +1,775 @@
+# Cinema API (HW3, MongoDB) — executable request collection (VS Code REST Client syntax).
+# Before: docker compose up -d && npm run start:dev   (npm run seed is optional)
+# Run the requests top to bottom: later requests use ids from earlier responses.
+# Every block has an "Expected:" line with the status code it should return.
+# Errors have one shape: { statusCode, message, error, path, timestamp }.
+# Every id is a MongoDB ObjectId (24 hex characters). Ids are taken from the
+# responses into variables, nothing is typed in by hand. {{missingId}} has the
+# right format but no document has it (-> 404); {{badId}} has a wrong format
+# (-> 400 before the database is queried).
+
+@baseUrl = http://localhost:3000
+@missingId = 000000000000000000000000
+@badId = not-an-object-id
+
+########################################################################
+# 1. Happy path: film -> hall -> showing -> booking
+########################################################################
+
+### Create a film
+# Expected: 201 Created
+# @name createFilm
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Interstellar",
+  "durationMinutes": 169,
+  "releaseYear": 2014
+}
+
+###
+@filmId = {{createFilm.response.body.id}}
+
+### Create a hall 3 x 5 (timestamp keeps the name unique between runs)
+# Expected: 201 Created
+# @name createHall
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Red Hall {{$timestamp}}",
+  "rows": 3,
+  "seatsPerRow": 5
+}
+
+###
+@hallId = {{createHall.response.body.id}}
+@hallName = {{createHall.response.body.name}}
+
+### Create a showing (price in kopecks)
+# Expected: 201 Created
+# @name createShowing
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+###
+@showingId = {{createShowing.response.body.id}}
+
+### Book two seats -> totalPrice = 15000 x 2 = 30000
+# Expected: 201 Created
+# @name createBooking
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 1 },
+    { "row": 1, "seat": 2 }
+  ]
+}
+
+###
+@bookingId = {{createBooking.response.body.id}}
+
+########################################################################
+# 2. All other routes
+########################################################################
+
+### List films
+# Expected: 200 OK
+GET {{baseUrl}}/films
+
+### Get the film
+# Expected: 200 OK
+GET {{baseUrl}}/films/{{filmId}}
+
+### Update the film (any subset of fields)
+# Expected: 200 OK
+PATCH {{baseUrl}}/films/{{filmId}}
+Content-Type: application/json
+
+{
+  "title": "Interstellar (IMAX)"
+}
+
+### Unknown fields are stripped (whitelist): "isAdmin" is not in the response
+# Expected: 201 Created
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Dune",
+  "durationMinutes": 155,
+  "releaseYear": 2021,
+  "isAdmin": true
+}
+
+### List halls
+# Expected: 200 OK
+GET {{baseUrl}}/halls
+
+### Get the hall with its computed seats (3 x 5 = 15 seats; not stored in MongoDB)
+# Expected: 200 OK
+GET {{baseUrl}}/halls/{{hallId}}
+
+### Second showing of the same film later the same day (for sorting/filters)
+# Expected: 201 Created
+# @name createShowing2
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T21:00:00.000Z",
+  "price": 18000
+}
+
+### Third showing of the same film on the next day (for paging)
+# Expected: 201 Created
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-16T18:00:00.000Z",
+  "price": 15000
+}
+
+### List showings: { items, total, page: 1, limit: 20 } (defaults; sorted by startsAt asc, then _id)
+# Every item has filmTitle and hallName (populate), no seats/bookings arrays.
+# Expected: 200 OK
+GET {{baseUrl}}/showings
+
+### Filter showings by film
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}
+
+### Filter showings by day (UTC date part of startsAt)
+# Expected: 200 OK
+GET {{baseUrl}}/showings?date=2030-01-15
+
+### Combined filters (AND)
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&date=2030-01-15
+
+### Pagination: first page of 2 showings of this film (total = 3)
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&page=1&limit=2
+
+### Pagination: second page (1 showing left)
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&page=2&limit=2
+
+### Sorting: latest first
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&sort=desc
+
+### Everything together: filter + sort + page
+# Expected: 200 OK
+GET {{baseUrl}}/showings?filmId={{filmId}}&date=2030-01-15&sort=desc&page=1&limit=1
+
+### Get the showing (film title and hall name via populate)
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}
+
+### Seat map of the showing: 15 seats, row 1 seats 1-2 are booked (isBooked from seats[].bookingId)
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+### Bookings of the showing (its embedded bookings array)
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/bookings
+
+### All bookings (collected from the bookings arrays of every showing)
+# Expected: 200 OK
+GET {{baseUrl}}/bookings
+
+### Create a film without showings (to delete it)
+# Expected: 201 Created
+# @name createTempFilm
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Temporary film",
+  "durationMinutes": 90,
+  "releaseYear": 2020
+}
+
+### Delete the film without showings
+# Expected: 204 No Content
+DELETE {{baseUrl}}/films/{{createTempFilm.response.body.id}}
+
+### Create a hall without showings (to delete it)
+# Expected: 201 Created
+# @name createTempHall
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Temporary hall {{$timestamp}}",
+  "rows": 2,
+  "seatsPerRow": 2
+}
+
+### Delete the hall without showings
+# Expected: 204 No Content
+DELETE {{baseUrl}}/halls/{{createTempHall.response.body.id}}
+
+########################################################################
+# 3. Error cases — films
+########################################################################
+
+### Film: missing fields
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "No duration and year"
+}
+
+### Film: wrong types
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": 123,
+  "durationMinutes": "169",
+  "releaseYear": 2014
+}
+
+### Film: durationMinutes not a positive integer
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Zero",
+  "durationMinutes": 0,
+  "releaseYear": 2014
+}
+
+### Film: whitespace-only title (trimmed to "")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "   ",
+  "durationMinutes": 120,
+  "releaseYear": 2014
+}
+
+### Film: durationMinutes above the limit (max 1000)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/films
+Content-Type: application/json
+
+{
+  "title": "Too long",
+  "durationMinutes": 1001,
+  "releaseYear": 2014
+}
+
+### Film: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/films/{{missingId}}
+
+### Film: id is not an ObjectId ("id must be a MongoDB ObjectId: ...")
+# Expected: 400 Bad Request
+GET {{baseUrl}}/films/{{badId}}
+
+### Film: PATCH with invalid value
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{filmId}}
+Content-Type: application/json
+
+{
+  "durationMinutes": -10
+}
+
+### Film: PATCH with whitespace-only title
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{filmId}}
+Content-Type: application/json
+
+{
+  "title": "   "
+}
+
+### Film: PATCH with a wrong type
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{filmId}}
+Content-Type: application/json
+
+{
+  "releaseYear": "2014"
+}
+
+### Film: PATCH with id that is not an ObjectId
+# Expected: 400 Bad Request
+PATCH {{baseUrl}}/films/{{badId}}
+Content-Type: application/json
+
+{
+  "title": "Nobody"
+}
+
+### Film: PATCH not found
+# Expected: 404 Not Found
+PATCH {{baseUrl}}/films/{{missingId}}
+Content-Type: application/json
+
+{
+  "title": "Nobody"
+}
+
+### Film: DELETE with id that is not an ObjectId
+# Expected: 400 Bad Request
+DELETE {{baseUrl}}/films/{{badId}}
+
+### Film: DELETE not found
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/films/{{missingId}}
+
+### Film: DELETE film that has a showing (checked by a query; showings are never deleted with it)
+# Expected: 409 Conflict
+DELETE {{baseUrl}}/films/{{filmId}}
+
+########################################################################
+# 4. Error cases — halls
+########################################################################
+
+### Hall: missing fields
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Incomplete"
+}
+
+### Hall: wrong type
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Wrong type",
+  "rows": "3",
+  "seatsPerRow": 5
+}
+
+### Hall: not a positive integer
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Negative",
+  "rows": 0,
+  "seatsPerRow": -5
+}
+
+### Hall: whitespace-only name (trimmed to "")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "   ",
+  "rows": 3,
+  "seatsPerRow": 5
+}
+
+### Hall: rows and seatsPerRow above the limit (max 50 each)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "Huge hall",
+  "rows": 51,
+  "seatsPerRow": 100000
+}
+
+### Hall: duplicate name
+# Expected: 409 Conflict
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "{{hallName}}",
+  "rows": 1,
+  "seatsPerRow": 1
+}
+
+### Hall: the same name with surrounding spaces (trimmed before the check;
+# letter case is ignored too — the unique index uses a case-insensitive collation)
+# Expected: 409 Conflict
+POST {{baseUrl}}/halls
+Content-Type: application/json
+
+{
+  "name": "  {{hallName}}  ",
+  "rows": 1,
+  "seatsPerRow": 1
+}
+
+### Hall: id is not an ObjectId
+# Expected: 400 Bad Request
+GET {{baseUrl}}/halls/{{badId}}
+
+### Hall: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/halls/{{missingId}}
+
+### Hall: DELETE with id that is not an ObjectId
+# Expected: 400 Bad Request
+DELETE {{baseUrl}}/halls/{{badId}}
+
+### Hall: DELETE not found
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/halls/{{missingId}}
+
+### Hall: DELETE hall that has a showing (checked by a query; showings are never deleted with it)
+# Expected: 409 Conflict
+DELETE {{baseUrl}}/halls/{{hallId}}
+
+########################################################################
+# 5. Error cases — showings
+########################################################################
+
+### Showing: film does not exist ("Film with id ... not found")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{missingId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: hall does not exist ("Hall with id ... not found")
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{missingId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: filmId is not an ObjectId
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{badId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: hallId is not an ObjectId
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{badId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: missing fields
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}"
+}
+
+### Showing: startsAt is not a valid ISO 8601 date-time
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "15.01.2030 18:00",
+  "price": 15000
+}
+
+### Showing: startsAt is in the past
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2020-01-01T10:00:00.000Z",
+  "price": 15000
+}
+
+### Showing: price is not positive
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 0
+}
+
+### Showing: price is not an integer (kopecks)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 150.5
+}
+
+### Showing: price above the limit (max 10 000 000 kopecks)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings
+Content-Type: application/json
+
+{
+  "filmId": "{{filmId}}",
+  "hallId": "{{hallId}}",
+  "startsAt": "2030-01-15T18:00:00.000Z",
+  "price": 10000001
+}
+
+### Showing: bad date filter format
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?date=15-01-2030
+
+### Showing: date filter is not a real date
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?date=2030-02-30
+
+### Showing list: filmId filter is not an ObjectId
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?filmId={{badId}}
+
+### Showing list: page is not a positive integer
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?page=0
+
+### Showing list: page is not an integer
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?page=1.5
+
+### Showing list: limit above 100
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=101
+
+### Showing list: limit below 1
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=0
+
+### Showing list: limit is not a number
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?limit=ten
+
+### Showing list: sort is neither asc nor desc
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings?sort=up
+
+### Showing: id is not an ObjectId
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings/{{badId}}
+
+### Showing: not found
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}
+
+### Showing: seats, id is not an ObjectId
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings/{{badId}}/seats
+
+### Showing: seats of a missing showing
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}/seats
+
+########################################################################
+# 6. Error cases — bookings
+########################################################################
+
+### Booking: showing id is not an ObjectId
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{badId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 1 }]
+}
+
+### Booking: showing does not exist
+# Expected: 404 Not Found
+POST {{baseUrl}}/showings/{{missingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 1 }]
+}
+
+### Booking: empty seats array
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": []
+}
+
+### Booking: seat item without numbers
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 2 }]
+}
+
+### Booking: seats is missing
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{}
+
+### Booking: numbers are not integers
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1.5, "seat": "2" }]
+}
+
+### Booking: non-positive numbers
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 0, "seat": -1 }]
+}
+
+### Booking: duplicate seat inside the array (checked before the update:
+# otherwise one free seat would satisfy both conditions and be sold twice)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 2, "seat": 2 },
+    { "row": 2, "seat": 2 }
+  ]
+}
+
+### Booking: row outside the hall (hall has 3 rows) — 400, not 409:
+# bounds are checked before the update, whose filter cannot tell
+# a missing seat from a taken one
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 4, "seat": 1 }]
+}
+
+### Booking: seat outside the hall (5 seats per row)
+# Expected: 400 Bad Request
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [{ "row": 1, "seat": 6 }]
+}
+
+### Booking: one seat already booked -> 409. The conditional update matched
+# nothing (matchedCount = 0), so the document is unchanged: row 1 seat 3
+# stays free and no booking is added (all-or-nothing).
+# Expected: 409 Conflict
+POST {{baseUrl}}/showings/{{showingId}}/bookings
+Content-Type: application/json
+
+{
+  "seats": [
+    { "row": 1, "seat": 3 },
+    { "row": 1, "seat": 2 }
+  ]
+}
+
+### Check: row 1 seat 3 is still free after the failed request
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+### Booking: bookings of a showing, id is not an ObjectId
+# Expected: 400 Bad Request
+GET {{baseUrl}}/showings/{{badId}}/bookings
+
+### Booking: bookings of a missing showing
+# Expected: 404 Not Found
+GET {{baseUrl}}/showings/{{missingId}}/bookings
+
+### Booking: cancel, id is not an ObjectId
+# Expected: 400 Bad Request
+DELETE {{baseUrl}}/bookings/{{badId}}
+
+### Booking: cancel a missing booking (no showing contains it)
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/bookings/{{missingId}}
+
+########################################################################
+# 7. Cancel the booking and check that the seats are free again
+########################################################################
+
+### Cancel the booking: one update sets seats[].bookingId back to null
+# and removes the booking from the bookings array ($pull)
+# Expected: 204 No Content
+DELETE {{baseUrl}}/bookings/{{bookingId}}
+
+### Seats row 1 seat 1-2 are free again (isBooked: false everywhere)
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/seats
+
+### The showing has no bookings any more
+# Expected: 200 OK
+GET {{baseUrl}}/showings/{{showingId}}/bookings
+
+### The cancelled booking cannot be cancelled twice
+# Expected: 404 Not Found
+DELETE {{baseUrl}}/bookings/{{bookingId}}
